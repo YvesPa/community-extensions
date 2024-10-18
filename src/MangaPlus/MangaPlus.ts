@@ -2,33 +2,33 @@ import {
     SourceManga,
     Chapter,
     ChapterDetails,
-    HomeSection,
-    SearchRequest,
     PagedResults,
-    SourceInfo,
-    ContentRating,
     Request,
     Response,
-    SourceIntents,
     SearchResultsProviding,
     ChapterProviding,
-    MangaProviding,
-    HomePageSectionsProviding,
-    HomeSectionType,
-    PartialSourceManga,
-    DUISection
+    Extension,
+    SettingsFormProviding,
+    BasicRateLimiter,
+    DiscoverSectionType,
+    Form,
+    SearchQuery,
+    SearchResultItem,
+    DiscoverSection
 } from '@paperback/types'
 
 import {
+    langPopup,
     Language,
     MangaPlusResponse,
     TitleDetailView
 } from './MangaPlusHelper'
 
 import {
-    contentSettings,
     getLanguages,
-    resetSettings
+    getResolution,
+    getSplitImages,
+    MangaPlusSettingForm
 } from './MangaPlusSettings'
 
 const BASE_URL = 'https://mangaplus.shueisha.co.jp'
@@ -36,129 +36,65 @@ const API_URL = 'https://jumpg-webapi.tokyo-cdn.com/api'
 
 const langCode = Language.ENGLISH
 
-export const MangaPlusInfo: SourceInfo = {
-    version: '2.0.3',
-    name: 'MangaPlus',
-    icon: 'icon.png',
-    author: 'Rinto-kun',
-    authorWebsite: 'https://github.com/Rinto-kun',
-    description: 'Extension that pulls manga from Manga+ by Shueisha',
-    contentRating: ContentRating.EVERYONE,
-    websiteBaseURL: BASE_URL,
-    sourceTags: [],
-    intents: SourceIntents.MANGA_CHAPTERS | SourceIntents.HOMEPAGE_SECTIONS | SourceIntents.CLOUDFLARE_BYPASS_REQUIRED | SourceIntents.SETTINGS_UI
-}
+export class MangaPlusSource implements Extension, SearchResultsProviding, ChapterProviding, SettingsFormProviding {
+    globalRateLimiter = new BasicRateLimiter('rateLimiter', {numberOfRequests: 10, bufferInterval: 1, ignoreImages: true})
 
-export class MangaPlus implements SearchResultsProviding, MangaProviding, ChapterProviding, HomePageSectionsProviding {
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    constructor() {}
 
-    stateManager = App.createSourceStateManager()
-
-    requestManager = App.createRequestManager({
-        requestsPerSecond: 10,
-        requestTimeout: 20000,
-        interceptor: {
-            interceptRequest: async (request: Request): Promise<Request> => {
-                request.headers = {
-                    ...(request.headers ?? {}),
-                    
-                    'Referer': `${BASE_URL}/`,
-                    'user-agent': await this.requestManager.getDefaultUserAgent()
-                }
-
-                if (request.url.startsWith('imageMangaId=')) {
-                    const mangaId = request.url.replace('imageMangaId=', '')
-                    request.url = await this.getThumbnailUrl(mangaId)
-                }
-
-                return request
-            },
-            interceptResponse: async (response: Response): Promise<Response> => {
-                if (!response.request.url.includes('encryptionKey') && response.headers['Content-Type'] !== 'image/jpeg') {
-                    return response
-                }
-
-                if (response.request.url.includes('title_thumbnail_portrait_list')) {
-                    return response
-                }
-
-                const encryptionKey = response.request.url.substring(response.request.url.lastIndexOf('#') + 1) ?? ''
-
-                // @ts-ignore
-                response.rawData = App.createRawData(this.decodeXoRCipher(App.createByteArray(response.rawData ?? new Uint8Array()), encryptionKey))
-
-                return response
-            }
-
-        }
-    });
-
-    async getSourceMenu(): Promise<DUISection> {
-        return App.createDUISection(
-            {
-
-                id: 'main',
-                header: 'Source Settings',
-                rows: async () => {
-                    return [
-                        contentSettings(this.stateManager),
-                        resetSettings(this.stateManager)
-                    ]
-                },
-                isHidden: false
-            }
-        )
-
+    async initialise(): Promise<void> {
+        console.log('MangaPlus Extension has been initialised')
+        this.registerInterceptors()
+        this.registerDiscoverSections()
     }
 
-    getMangaShareUrl(mangaId: string): string { return `${BASE_URL}/titles/${mangaId}` }
-
     async getMangaDetails(mangaId: string): Promise<SourceManga> {
-        const request = App.createRequest({
+        const request = {
             url: `${API_URL}/title_detailV3?title_id=${mangaId}&format=json`,
             method: 'GET'
-        })
+        }
 
-        const response = await this.requestManager.schedule(request, 1)
-        const result = TitleDetailView.fromJson(response.data as string)
+        const response = (await Application.scheduleRequest(request))[1]
+        const result = TitleDetailView.fromJson(Application.arrayBufferToUTF8String(response))
 
         return result.toSourceManga()
     }
 
     private async getThumbnailUrl(mangaId: string): Promise<string> {
-        const request = App.createRequest({
+        const request = {
             url: `${API_URL}/title_detailV3?title_id=${mangaId}&format=json`,
             method: 'GET'
-        })
+        }
 
-        const response = await this.requestManager.schedule(request, 1)
-        const result = TitleDetailView.fromJson(response.data as string)
+        const response = (await Application.scheduleRequest(request))[1]
+        const result = TitleDetailView.fromJson(Application.arrayBufferToUTF8String(response))
         
         return result.title?.portraitImageUrl ?? ''
     }
 
-    async getChapters(mangaId: string): Promise<Chapter[]> {
-        const request = App.createRequest({
-            url: `${API_URL}/title_detailV3?title_id=${mangaId}&format=json`,
+    async getChapters(sourceManga: SourceManga): Promise<Chapter[]> {
+        const request = {
+            url: `${API_URL}/title_detailV3?title_id=${sourceManga.mangaId}&format=json`,
             method: 'GET'
-        })
+        }
 
-        const response = await this.requestManager.schedule(request, 1)
-        const result = TitleDetailView.fromJson(response.data as string)
+        const response = (await Application.scheduleRequest(request))[1]
+        const result = TitleDetailView.fromJson(Application.arrayBufferToUTF8String(response))
 
-        return [...(result.firstChapterList ?? []), ...(result.lastChapterList ?? [])].reverse().filter(chapter => !chapter.isExpired).map(chapter => chapter.toSChapter())
+        return [...(result.firstChapterList ?? []), ...(result.lastChapterList ?? [])].reverse().filter(chapter => !chapter.isExpired).map(chapter => chapter.toSChapter(sourceManga))
     }
 
-    async getChapterDetails(mangaId: string, chapterId: string): Promise<ChapterDetails> {
-        const request = App.createRequest({
-            url: `${API_URL}/manga_viewer?chapter_id=${chapterId}&split=${(await this.stateManager.retrieve('split_images')) as string ?? 'no'}&img_quality=${(await this.stateManager.retrieve('image_resolution')) as string ?? 'high'}&format=json`,
+    async getChapterDetails(chapter: Chapter): Promise<ChapterDetails> {
+        const request = {
+            url: `${API_URL}/manga_viewer?chapter_id=${chapter.chapterId}&split=${getSplitImages()}&img_quality=${getResolution()}&format=json`,
             method: 'GET'
-        })
+        }
 
-        const response = await this.requestManager.schedule(request, 1)
-        const result = JSON.parse(response.data as string) as MangaPlusResponse
+        const response = (await Application.scheduleRequest(request))[1]
+        const result = JSON.parse(Application.arrayBufferToUTF8String(response)) as MangaPlusResponse
 
         if (result.success === undefined) {
-            throw new Error(result.error?.langPopup(Language.ENGLISH)?.body ?? 'Unknown error')
+            throw new Error(langPopup(result.error, Language.ENGLISH)?.body ?? 'Unknown error')
         }
 
         const pages = result.success.mangaViewer?.pages
@@ -166,33 +102,33 @@ export class MangaPlus implements SearchResultsProviding, MangaProviding, Chapte
             .filter(page => page)
             .map((page) => page?.encryptionKey ? `${page?.imageUrl}#${page?.encryptionKey}` : '')
 
-        return App.createChapterDetails({
-            id: chapterId,
-            mangaId: mangaId,
+        return {
+            id: chapter.chapterId,
+            mangaId: chapter.sourceManga.mangaId,
             pages: pages ?? []
-        })
+        }
 
     }
 
-    async getFeaturedTitles(): Promise<PartialSourceManga[]> {
-        const request = App.createRequest({
+    async getFeaturedTitles(section: DiscoverSection, metadata: any | undefined) : Promise<PagedResults<SearchResultItem>> {
+        const request = {
             url: `${API_URL}/featuredV2?lang=eng&clang=eng&format=json`,
             method: 'GET'
-        })
-
-        const response = await this.requestManager.schedule(request, 1)
-        const result = JSON.parse(response.data as string) as MangaPlusResponse
-
-        if (result.success === undefined) {
-            throw new Error(result.error?.langPopup(Language.ENGLISH)?.body ?? 'Unknown error')
         }
 
-        const languages = await getLanguages(this.stateManager)
+        const response = (await Application.scheduleRequest(request))[1]
+        const result = JSON.parse(Application.arrayBufferToUTF8String(response)) as MangaPlusResponse
+
+        if (result.success === undefined) {
+            throw new Error(langPopup(result.error, Language.ENGLISH)?.body ?? 'Unknown error')
+        }
+
+        const languages = await getLanguages()
 
         const results = result.success?.featuredTitlesViewV2?.contents?.find(x => x.titleList && x.titleList.listName == 'WEEKLY SHONEN JUMP')?.titleList.featuredTitles
             .filter((title) => languages.includes(title.language ?? Language.ENGLISH))
 
-        const titles: PartialSourceManga[] = []
+        const titles: SearchResultItem[] = []
         const collectedIds: string[] = []
 
         for (const item of results ?? []) {
@@ -203,36 +139,38 @@ export class MangaPlus implements SearchResultsProviding, MangaProviding, Chapte
 
             if (!mangaId || !title || collectedIds.includes(mangaId)) continue
 
-            titles.push(App.createPartialSourceManga({
+            titles.push({
                 mangaId: mangaId,
                 title: title,
                 subtitle: author,
-                image: image
-            }))
+                imageUrl: image
+            })
         }
 
-        return titles
+        return {
+            items: titles
+        }
     }
 
-    async getPopularTitles(): Promise<PartialSourceManga[]> {
-        const request = App.createRequest({
+    async getPopularTitles(section: DiscoverSection, metadata: any | undefined) : Promise<PagedResults<SearchResultItem>> {
+        const request = {
             url: `${API_URL}/title_list/ranking?format=json`,
             method: 'GET'
-        })
-
-        const response = await this.requestManager.schedule(request, 1)
-        const result = JSON.parse(response.data as string) as MangaPlusResponse
-
-        if (result.success === undefined) {
-            throw new Error(result.error?.langPopup(Language.ENGLISH)?.body ?? 'Unknown error')
         }
 
-        const languages = await getLanguages(this.stateManager)
+        const response = (await Application.scheduleRequest(request))[1]
+        const result = JSON.parse(Application.arrayBufferToUTF8String(response)) as MangaPlusResponse
+
+        if (result.success === undefined) {
+            throw new Error(langPopup(result.error, Language.ENGLISH)?.body ?? 'Unknown error')
+        }
+
+        const languages = await getLanguages()
 
         const results = result.success?.titleRankingView?.titles
             .filter((title) => languages.includes(title.language ?? Language.ENGLISH))
 
-        const titles: PartialSourceManga[] = []
+        const titles: SearchResultItem[] = []
         const collectedIds: string[] = []
 
         for (const item of results ?? []) {
@@ -243,36 +181,33 @@ export class MangaPlus implements SearchResultsProviding, MangaProviding, Chapte
 
             if (!mangaId || !title || collectedIds.includes(mangaId)) continue
 
-            titles.push(App.createPartialSourceManga({
+            titles.push({
                 mangaId: mangaId,
                 title: title,
                 subtitle: author,
-                image: image
-            }))
-        }
-
-        return titles
-    }
-
-    async getLatestUpdates(): Promise<PartialSourceManga[]> {
-
-        function latestUpdatesRequest() {
-            return App.createRequest({
-                url: `${API_URL}/web/web_homeV4?lang=eng&format=json`,
-                method: 'GET'
+                imageUrl: image
             })
         }
 
-        const request = latestUpdatesRequest()
-        const response = await this.requestManager.schedule(request, 1)
+        return {
+            items: titles
+        }
+    }
 
-        const result: MangaPlusResponse = JSON.parse(response.data as string)
-
-        if (result.success === undefined) {
-            throw new Error(result.error?.langPopup(langCode)?.body ?? 'Unknown error')
+    async getLatestUpdates(section: DiscoverSection, metadata: any | undefined) : Promise<PagedResults<SearchResultItem>> {
+        const request = {
+            url: `${API_URL}/web/web_homeV4?lang=eng&format=json`,
+            method: 'GET'
         }
 
-        const languages = await getLanguages(this.stateManager)
+        const response = (await Application.scheduleRequest(request))[1]
+        const result = JSON.parse(Application.arrayBufferToUTF8String(response)) as MangaPlusResponse
+
+        if (result.success === undefined) {
+            throw new Error(langPopup(result.error, langCode)?.body ?? 'Unknown error')
+        }
+
+        const languages = await getLanguages()
 
         const results = result.success.webHomeViewV4?.groups
             .flatMap(ex => ex.titleGroups)
@@ -280,7 +215,7 @@ export class MangaPlus implements SearchResultsProviding, MangaProviding, Chapte
             .map(title => title.title)
             .filter(title => languages.includes(title.language ?? Language.ENGLISH))
 
-        const titles: PartialSourceManga[] = []
+        const titles: SearchResultItem[] = []
         const collectedIds: string[] = []
 
         for (const item of results ?? []) {
@@ -291,97 +226,43 @@ export class MangaPlus implements SearchResultsProviding, MangaProviding, Chapte
 
             if (!mangaId || !title || collectedIds.includes(mangaId)) continue
 
-            titles.push(App.createPartialSourceManga({
+            titles.push({
                 mangaId: mangaId,
                 title: title,
                 subtitle: author,
-                image: image
-            }))
+                imageUrl: image
+            })
         }
 
-        return titles
-    }
-
-    async getHomePageSections(sectionCallback: (section: HomeSection) => void): Promise<void> {
-
-        const featuredSection = App.createHomeSection({
-            id: 'featured',
-            title: 'Deatured',
-            containsMoreItems: true,
-            type: HomeSectionType.featured,
-            items: await this.getFeaturedTitles()
-        })
-        sectionCallback(featuredSection)
-
-        const popularSection = App.createHomeSection({
-            id: 'popular',
-            title: 'Popular',
-            containsMoreItems: true,
-            type: HomeSectionType.singleRowNormal,
-            items: await this.getPopularTitles()
-        })
-        sectionCallback(popularSection)
-
-        const latestUpdatesSection = App.createHomeSection({
-            id: 'latest_updates',
-            title: 'Latest Updates',
-            containsMoreItems: true,
-            type: HomeSectionType.singleRowNormal,
-            items: await this.getLatestUpdates()
-        })
-        sectionCallback(latestUpdatesSection)
-    }
-
-    async getViewMoreItems(homepageSectionId: string, metadata: any): Promise<PagedResults> {
-        let items: PartialSourceManga[] = []
-
-        switch (homepageSectionId) {
-            case 'featured':
-                items = await this.getFeaturedTitles()
-                break
-
-            case 'popular':
-                items = await this.getPopularTitles()
-                break
-
-            case 'latest_updates':
-                items = await this.getLatestUpdates()
-                break
-
-            default:
-                throw new Error(`Invalid homeSectionId | ${homepageSectionId}`)
+        return {
+            items: titles
         }
-
-        return App.createPagedResults({
-            results: items,
-            metadata
-        })
     }
 
-    async getSearchResults(query: SearchRequest, metadata: any): Promise<PagedResults> {
+
+    async getSearchResults(query: SearchQuery, metadata: any): Promise<PagedResults<SearchResultItem>> {
         const title = query.title ?? ''
 
-        const request = App.createRequest({
+        const request = {
             url: `${API_URL}/title_list/allV2?format=JSON&${title ? 'filter=' + encodeURI(title) + '&' : ''}format=json`,
             method: 'GET'
         }
-        )
 
-        const response = await this.requestManager.schedule(request, 1)
-        const result = JSON.parse(response.data as string) as MangaPlusResponse
+        const response = (await Application.scheduleRequest(request))[1]
+        const result = JSON.parse(Application.arrayBufferToUTF8String(response)) as MangaPlusResponse
 
         if (result.success === undefined) {
-            throw new Error(result.error?.langPopup(Language.ENGLISH)?.body ?? 'Unknown error')
+            throw new Error(langPopup(result.error, Language.ENGLISH)?.body ?? 'Unknown error')
         }
 
         const ltitle = query.title?.toLowerCase() ?? ''
-        const languages = await getLanguages(this.stateManager)
+        const languages = await getLanguages()
 
         const results = result.success?.allTitlesViewV2?.AllTitlesGroup.flatMap((group) => group.titles)
             .filter((title) => languages.includes(title.language ?? Language.ENGLISH))
             .filter((title) => title.author?.toLowerCase().includes(ltitle) || title.name.toLowerCase().includes(ltitle))
 
-        const titles: PartialSourceManga[] = []
+        const titles: SearchResultItem[] = []
         const collectedIds: string[] = []
 
         for (const item of results ?? []) {
@@ -392,23 +273,117 @@ export class MangaPlus implements SearchResultsProviding, MangaProviding, Chapte
 
             if (!mangaId || !title || collectedIds.includes(mangaId)) continue
 
-            titles.push(App.createPartialSourceManga({
+            titles.push({
                 mangaId: mangaId,
                 title: title,
                 subtitle: author,
-                image: image
-            }))
+                imageUrl: image
+            })
         }
 
-        return App.createPagedResults({
-            results: titles
-        })
+        return {
+            items: titles
+        }
     }
 
     // Utility
     private decodeXoRCipher(buffer: Uint8Array, encryptionKey: string) {
+        console.log('Decoding with key:', encryptionKey)
         const key = encryptionKey.match(/../g)?.map((byte) => parseInt(byte, 16)) ?? []
 
         return buffer.map((byte, index) => byte ^ (key[index % key.length] ?? 0))
     }
+    
+    registerInterceptors() {
+        this.globalRateLimiter.registerInterceptor()
+        Application.registerInterceptor(
+            'mangaPlusInterceptor',
+            Application.Selector(this as MangaPlusSource, 'interceptRequest'),
+            Application.Selector(this as MangaPlusSource, 'interceptResponse')
+        )
+    }
+
+    async interceptRequest(request: Request): Promise<Request> {
+        request.headers = {
+            ...(request.headers ?? {}),
+            
+            'Referer': `${BASE_URL}/`,
+            'user-agent': await Application.getDefaultUserAgent()
+        }
+
+        if (request.url.startsWith('imageMangaId=')) {
+            const mangaId = request.url.replace('imageMangaId=', '')
+            request.url = await this.getThumbnailUrl(mangaId)
+        }
+
+        return request
+    }
+
+    async interceptResponse(request: Request, response: Response, data: ArrayBuffer): Promise<ArrayBuffer> {
+        console.log(`here 1 request >>>>${JSON.stringify(request)}<<<<<< response>>>>>${JSON.stringify(response)}<<<<`)
+        if (!request.url.includes('encryptionKey') && response.headers['Content-Type'] !== 'image/jpeg') {
+            return data
+        }
+
+        console.log('here 2')
+        if (request.url.includes('title_thumbnail_portrait_list')) {
+            return data
+        }
+
+        console.log('here 3')
+        const encryptionKey = request.url.substring(request.url.lastIndexOf('#') + 1) ?? ''
+        
+        console.log('here 4')
+        const test = this.decodeXoRCipher(new Uint8Array(data), encryptionKey)
+        console.log('here 5')
+        return test.buffer
+    }
+
+    async registerDiscoverSections(): Promise<void> {
+
+        Application.registerDiscoverSection(
+            {
+                id: 'featured',
+                title: 'Featured',
+                type: DiscoverSectionType.simpleCarousel
+            },
+            Application.Selector(this as MangaPlusSource, 'getFeaturedTitles')
+        )
+
+        Application.registerDiscoverSection(
+            {
+                id: 'popular',
+                title: 'Popular',
+                type: DiscoverSectionType.simpleCarousel
+            },
+            Application.Selector(this as MangaPlusSource, 'getPopularTitles')
+        )
+
+        Application.registerDiscoverSection(
+            {
+                id: 'latest_updates',
+                title: 'Latest Updates',
+                type: DiscoverSectionType.simpleCarousel
+            },
+            Application.Selector(this as MangaPlusSource, 'getLatestUpdates')
+        )
+
+    }
+
+    /* TODO ?
+    async registerSearchFilters(): Promise<void> {
+        const genres = await this.getSearchTags()
+        Application.registerSearchFilter({
+            id: '0',
+            title: 'Genres',
+            type: 'dropdown',
+            options: genres.map(genre => ({ id: genre.id, value: genre.title })),
+            value: 'ALL'
+        })
+    }*/
+
+    async getSettingsForm(): Promise<Form> {
+        return new MangaPlusSettingForm()
+    }
+    
 }

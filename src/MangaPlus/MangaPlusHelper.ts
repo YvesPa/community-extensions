@@ -1,4 +1,8 @@
-import { SourceManga } from '@paperback/types'
+import { 
+    ContentRating, 
+    SourceManga,
+    Chapter as SourceChapter
+} from '@paperback/types'
 
 
 export interface MangaPlusResponse {
@@ -58,10 +62,10 @@ interface UpdatedTitle {
 
 class ErrorResult {
     popups: Popup[] = []
+}
 
-    langPopup(lang: Language): Popup | null {
-        return this.popups.find(popup => popup.language === lang) || null
-    }
+export function langPopup(errorResult: ErrorResult | undefined, lang: Language): Popup | null {
+    return errorResult?.popups?.find(popup => (popup.language ?? Language.ENGLISH) === lang) || null
 }
 
 class Popup {
@@ -191,24 +195,29 @@ export class TitleDetailView {
 
     toSourceManga(): SourceManga {
         const authors = this.title?.author?.split('/')
-        return App.createSourceManga({
-            id: this.title?.titleId.toString() ?? '',
-            mangaInfo: App.createMangaInfo({
-                image: 'imageMangaId=' + this.title?.titleId,
-                titles: [this.title?.name ?? ''],
-                author: authors ? authors[0]?.trimEnd() : this.title?.author ?? '',
+
+        return  {
+            mangaId: this.title?.titleId.toString() ?? '',
+            mangaInfo: {
+                thumbnailUrl: 'imageMangaId=' + this.title?.titleId,
+                synopsis: (this.overview ?? '') + '\n\n' + (this.viewingPeriodDescription ?? ''),
+                primaryTitle: this.title?.name ?? '',
+                secondaryTitles: [],
+                contentRating: ContentRating.EVERYONE,
+
+                status: this.isCompleted ? 'Completed' : this.isOnHiatus ? 'On hiatus' : 'Ongoing',
                 artist: authors ? authors[1]?.trimStart() : this.title?.author ?? '',
-                desc: (this.overview ?? '') + '\n\n' + (this.viewingPeriodDescription ?? ''),
-                tags: [
-                    App.createTagSection({
+                author: authors ? authors[0]?.trimEnd() : this.title?.author ?? '',
+                tagGroups: [
+                    {
                         id: '0',
-                        label: 'genres',
-                        tags: this.genres.map(genre => App.createTag({ id: genre, label: genre }))
-                    })
-                ],
-                status: this.isCompleted ? 'Completed' : this.isOnHiatus ? 'On hiatus' : 'Ongoing'
-            })
-        })
+                        title: 'genres',
+                        tags: this.genres.map(genre => ({ id: genre, title: genre }))
+                    }
+                ]
+
+            }
+        }
     }
 
     private static COMPLETED_REGEX = /completado|complete|completo/
@@ -254,15 +263,17 @@ class Chapter {
         return this.subTitle == null
     }
 
-    toSChapter() {
+    toSChapter(sourceManga: SourceManga) : SourceChapter {
         const chapNum = parseFloat(this.name.slice(this.name.lastIndexOf('#') + 1))
 
-        return App.createChapter({
-            id: this.chapterId.toString(),
-            name: this.subTitle ? this.subTitle : '',
+        return {
+            chapterId: this.chapterId.toString(),
+            sourceManga: sourceManga,
+            langCode : 'en', //TODODODO
+            title: this.subTitle ? this.subTitle : '',
             chapNum: isNaN(chapNum) ? 0 : chapNum,
             sortingIndex: isNaN(chapNum) ? -1 : chapNum,
-            time: new Date(this.startTimeStamp * 1000)
-        })
+            publishDate: new Date(this.startTimeStamp * 1000)
+        }
     }
 }
