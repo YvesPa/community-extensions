@@ -14,7 +14,9 @@ import {
     Form,
     SearchQuery,
     SearchResultItem,
-    DiscoverSection
+    DiscoverSection,
+    DiscoverSectionProviding,
+    DiscoverSectionItem
 } from '@paperback/types'
 
 import {
@@ -36,7 +38,7 @@ const API_URL = 'https://jumpg-webapi.tokyo-cdn.com/api'
 
 const langCode = Language.ENGLISH
 
-export class MangaPlusSource implements Extension, SearchResultsProviding, ChapterProviding, SettingsFormProviding {
+export class MangaPlusSource implements Extension, SearchResultsProviding, ChapterProviding, SettingsFormProviding, DiscoverSectionProviding {
     globalRateLimiter = new BasicRateLimiter('rateLimiter', {numberOfRequests: 10, bufferInterval: 1, ignoreImages: true})
 
     // eslint-disable-next-line @typescript-eslint/no-empty-function
@@ -45,7 +47,6 @@ export class MangaPlusSource implements Extension, SearchResultsProviding, Chapt
     async initialise(): Promise<void> {
         console.log('MangaPlus Extension has been initialised')
         this.registerInterceptors()
-        this.registerDiscoverSections()
     }
 
     async getMangaDetails(mangaId: string): Promise<SourceManga> {
@@ -339,35 +340,46 @@ export class MangaPlusSource implements Extension, SearchResultsProviding, Chapt
         return test.buffer
     }
 
-    async registerDiscoverSections(): Promise<void> {
-
-        Application.registerDiscoverSection(
+        
+    getDiscoverSections(): Promise<DiscoverSection[]>
+    {
+        return Promise.resolve([
             {
                 id: 'featured',
                 title: 'Featured',
                 type: DiscoverSectionType.simpleCarousel
             },
-            Application.Selector(this as MangaPlusSource, 'getFeaturedTitles')
-        )
-
-        Application.registerDiscoverSection(
             {
                 id: 'popular',
                 title: 'Popular',
                 type: DiscoverSectionType.simpleCarousel
             },
-            Application.Selector(this as MangaPlusSource, 'getPopularTitles')
-        )
-
-        Application.registerDiscoverSection(
             {
                 id: 'latest_updates',
                 title: 'Latest Updates',
                 type: DiscoverSectionType.simpleCarousel
-            },
-            Application.Selector(this as MangaPlusSource, 'getLatestUpdates')
-        )
+            }
+        ])
+    }
 
+    async getDiscoverSectionItems(section: DiscoverSection, metadata: unknown | undefined): Promise<PagedResults<DiscoverSectionItem>>{
+        let result : PagedResults<SearchResultItem> = { items: [] }
+        switch (section.id) {
+            case 'featured':
+                result = await this.getFeaturedTitles(section, metadata)
+                break
+            case 'popular':
+                result = await this.getPopularTitles(section, metadata)
+                break
+            case 'latest_updates':
+                result = await this.getLatestUpdates(section, metadata)
+                break
+        }
+
+        return {
+            items: result.items.map(item => ({ type: 'simpleCarouselItem', ...item })),
+            metadata: result.metadata
+        }
     }
 
     /* TODO ?
